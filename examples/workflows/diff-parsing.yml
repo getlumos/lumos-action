@@ -1,0 +1,306 @@
+name: Diff Parsing Examples
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Example 1: Extract File List from diff-summary
+  extract-file-list:
+    name: Extract Changed Files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+          comment-on-pr: false
+
+      - name: Parse file list from diff-summary
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            // Extract filenames (looking for markdown code: `filename.ext`)
+            const filePattern = /`([^`]+\.(rs|ts))`/g;
+            const matches = [...diffSummary.matchAll(filePattern)];
+            const files = matches.map(m => m[1]);
+
+            console.log('Changed files:', files);
+
+            // Count by language
+            const rustFiles = files.filter(f => f.endsWith('.rs'));
+            const tsFiles = files.filter(f => f.endsWith('.ts'));
+
+            const comment = `## 📊 Drift Analysis\n\n` +
+              `**Total files:** ${files.length}\n` +
+              `- 🦀 Rust: ${rustFiles.length}\n` +
+              `- 📘 TypeScript: ${tsFiles.length}\n\n` +
+              `**Files:**\n` +
+              files.map(f => `- \`${f}\``).join('\n');
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 2: Parse Diff Statistics
+  parse-diff-stats:
+    name: Parse Diff Statistics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+
+      - name: Calculate diff statistics
+        if: steps.lumos.outputs.drift-detected == 'true'
+        id: stats
+        run: |
+          # Get detailed diff stats
+          ADDITIONS=$(git diff --numstat | awk '{sum+=$1} END {print sum}')
+          DELETIONS=$(git diff --numstat | awk '{sum+=$2} END {print sum}')
+          FILES_CHANGED=$(git diff --name-only | wc -l | tr -d ' ')
+
+          echo "additions=$ADDITIONS" >> $GITHUB_OUTPUT
+          echo "deletions=$DELETIONS" >> $GITHUB_OUTPUT
+          echo "files_changed=$FILES_CHANGED" >> $GITHUB_OUTPUT
+
+          echo "Additions: $ADDITIONS"
+          echo "Deletions: $DELETIONS"
+          echo "Files changed: $FILES_CHANGED"
+
+      - name: Post stats comment
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const additions = '${{ steps.stats.outputs.additions }}';
+            const deletions = '${{ steps.stats.outputs.deletions }}';
+            const filesChanged = '${{ steps.stats.outputs.files_changed }}';
+
+            const comment = `## 📈 Code Generation Stats\n\n` +
+              `\`\`\`diff\n` +
+              `+ ${additions} additions\n` +
+              `- ${deletions} deletions\n` +
+              `~ ${filesChanged} files changed\n` +
+              `\`\`\`\n\n` +
+              `Generated code has diverged from schemas. Please regenerate.`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 3: Detect Breaking Changes in Generated Code
+  detect-breaking-changes:
+    name: Detect Breaking Changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need history for comparison
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+
+      - name: Analyze breaking changes
+        if: steps.lumos.outputs.drift-detected == 'true'
+        id: breaking
+        run: |
+          # Check for potential breaking changes
+          BREAKING=false
+
+          # Check for removed fields or types
+          if git diff | grep -q '^-.*pub struct\|^-.*pub enum'; then
+            echo "Potential breaking change: Type removed"
+            BREAKING=true
+          fi
+
+          # Check for field removals
+          if git diff | grep -q '^-.*pub.*:'; then
+            echo "Potential breaking change: Field removed"
+            BREAKING=true
+          fi
+
+          # Check for type changes
+          if git diff | grep -E '^\-.*: (u|i)(8|16|32|64|128)' | grep -E '^\+.*: (u|i)(8|16|32|64|128)'; then
+            echo "Potential breaking change: Field type changed"
+            BREAKING=true
+          fi
+
+          echo "breaking=$BREAKING" >> $GITHUB_OUTPUT
+
+      - name: Warn about breaking changes
+        if: steps.breaking.outputs.breaking == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `## ⚠️ Potential Breaking Changes Detected\n\n` +
+              `Generated code changes may include breaking modifications:\n\n` +
+              `- Removed types or fields\n` +
+              `- Changed field types\n` +
+              `- Modified enum variants\n\n` +
+              `**Required Actions:**\n` +
+              `1. Review the diff carefully\n` +
+              `2. Add \`breaking-change\` label if confirmed\n` +
+              `3. Update CHANGELOG.md\n` +
+              `4. Document migration path\n\n` +
+              `See the [diff summary](${{ github.event.pull_request.html_url }}/files) for details.`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+            // Add label
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['potential-breaking-change']
+            });
+
+  # Example 4: Format Diff as Table
+  format-diff-table:
+    name: Format Diff as Table
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+          comment-on-pr: false
+
+      - name: Create diff table
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            // Get file-by-file stats
+            const diffStats = execSync('git diff --numstat').toString().trim();
+            const lines = diffStats.split('\n');
+
+            let table = '## 📋 Drift Details\n\n';
+            table += '| File | Additions | Deletions | Total Changes |\n';
+            table += '|------|-----------|-----------|---------------|\n';
+
+            lines.forEach(line => {
+              const [additions, deletions, file] = line.split('\t');
+              const total = parseInt(additions || 0) + parseInt(deletions || 0);
+              const icon = file.endsWith('.rs') ? '🦀' : file.endsWith('.ts') ? '📘' : '📄';
+
+              table += `| ${icon} \`${file}\` | +${additions} | -${deletions} | ${total} |\n`;
+            });
+
+            table += '\n**Action:** Run `lumos generate` to update generated files.';
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: table
+            });
+
+  # Example 5: Extract and Format Full Diff
+  format-full-diff:
+    name: Format Full Diff with Syntax Highlighting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+          comment-on-pr: false
+
+      - name: Format and post full diff
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            // Get full diff
+            const fullDiff = execSync('git diff').toString();
+
+            // Truncate if too large (GitHub comment limit: ~65k chars)
+            const maxLength = 60000;
+            const truncated = fullDiff.length > maxLength;
+            const diff = truncated ? fullDiff.substring(0, maxLength) : fullDiff;
+
+            let comment = '## 🔍 Generated Code Diff\n\n';
+
+            if (truncated) {
+              comment += '⚠️ **Note:** Diff truncated due to size. View full diff in [Files Changed](${{ github.event.pull_request.html_url }}/files).\n\n';
+            }
+
+            comment += '<details>\n';
+            comment += '<summary>Click to expand diff</summary>\n\n';
+            comment += '```diff\n';
+            comment += diff;
+            comment += '\n```\n';
+            comment += '</details>\n\n';
+            comment += '**To fix:** `lumos generate schemas/**/*.lumos`';
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 6: Parse diff-summary Output Format
+  understand-diff-summary:
+    name: Understand diff-summary Output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+
+      - name: Inspect diff-summary structure
+        run: |
+          echo "=== diff-summary Output Format ==="
+          echo ""
+          echo "The diff-summary output is a markdown-formatted string containing:"
+          echo "1. Header: '## 📊 LUMOS Generation Drift Detected'"
+          echo "2. File list with backtick formatting: \`filename.rs\`"
+          echo "3. Collapsible details section with full diff"
+          echo ""
+          echo "=== Actual Output ==="
+          echo "${{ steps.lumos.outputs.diff-summary }}"
+          echo ""
+          echo "=== Parsing Tips ==="
+          echo "- Extract files: Use regex /\`([^\`]+\\.(rs|ts))\`/g"
+          echo "- Extract diff: Look between \`\`\`diff and \`\`\`"
+          echo "- Check for 'No drift detected' message for clean state"

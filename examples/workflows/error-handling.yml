@@ -1,0 +1,290 @@
+name: Error Handling Examples
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # Example 1: Distinguish Validation Errors from Drift Warnings
+  validation-vs-drift:
+    name: Validation Errors vs Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Validation errors ALWAYS fail (syntax errors, type errors)
+      - name: Validate schemas (strict)
+        id: validate
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          check-only: true  # Only validate, don't generate
+        continue-on-error: true  # Capture error for analysis
+
+      # Check if validation failed
+      - name: Handle validation failure
+        if: steps.validate.outcome == 'failure'
+        run: |
+          echo "::error::Schema validation failed - syntax or type errors detected"
+          echo "This is a VALIDATION ERROR - must be fixed before proceeding"
+          exit 1
+
+      # If validation passed, check for drift
+      - name: Check for drift (configurable)
+        if: steps.validate.outcome == 'success'
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: ${{ github.event_name == 'pull_request' }}  # Fail on PR, warn on push
+
+      - name: Log drift status
+        if: steps.validate.outcome == 'success'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Drift check: STRICT (fails on drift)"
+          else
+            echo "Drift check: LENIENT (warns only)"
+          fi
+
+  # Example 2: Separate Validation and Generation Steps
+  separate-steps:
+    name: Separate Validation & Generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Step 1: Validate schemas (ALWAYS STRICT)
+      - name: Step 1 - Validate schemas
+        id: validate
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          check-only: true  # Validation only
+          fail-on-drift: false  # Not applicable for check-only
+        # No continue-on-error - validation errors MUST fail
+
+      # Step 2: Generate code (only if validation passed)
+      - name: Step 2 - Generate code
+        if: success()
+        id: generate
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false  # Don't fail on drift yet
+
+      # Step 3: Decide drift handling based on context
+      - name: Step 3 - Handle drift
+        if: steps.generate.outputs.drift-detected == 'true'
+        run: |
+          echo "Drift detected in generated files"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::error::Pull request has schema drift - regenerate code"
+            exit 1
+          else
+            echo "::warning::Main branch has drift - consider auto-commit"
+          fi
+
+  # Example 3: Error Type Detection and Reporting
+  error-type-detection:
+    name: Detect Error Types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run LUMOS with error capture
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+        continue-on-error: true
+
+      - name: Analyze error type
+        if: steps.lumos.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check outputs to determine error type
+            const validated = '${{ steps.lumos.outputs.schemas-validated }}';
+            const generated = '${{ steps.lumos.outputs.schemas-generated }}';
+
+            let errorType = 'UNKNOWN';
+            let errorMessage = '';
+
+            if (validated === '0' || validated === '') {
+              errorType = 'VALIDATION_ERROR';
+              errorMessage = '❌ **Validation Error** - Schema syntax or type errors detected.\n\n' +
+                           '**Fix:** Review schema syntax, check for typos, undefined types, or invalid syntax.';
+            } else if (generated === '0' || generated === '') {
+              errorType = 'GENERATION_ERROR';
+              errorMessage = '❌ **Generation Error** - Code generation failed.\n\n' +
+                           '**Fix:** Check LUMOS CLI logs, verify generator compatibility.';
+            } else {
+              errorType = 'DRIFT_ERROR';
+              errorMessage = '⚠️ **Drift Warning** - Generated code differs from committed files.\n\n' +
+                           '**Fix:** Run `lumos generate schemas/**/*.lumos` and commit changes.';
+            }
+
+            console.log(`Error Type: ${errorType}`);
+
+            // Post detailed error comment on PR
+            if (context.eventName === 'pull_request') {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## 🚨 LUMOS Error Detected\n\n**Type:** \`${errorType}\`\n\n${errorMessage}`
+              });
+            }
+
+            core.setFailed(`LUMOS ${errorType}`);
+
+  # Example 4: Graceful Degradation
+  graceful-degradation:
+    name: Graceful Degradation on Errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate with fallback
+        id: validate
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          version: 'latest'  # Try latest version
+        continue-on-error: true
+
+      - name: Retry with pinned version on failure
+        if: steps.validate.outcome == 'failure'
+        id: retry
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          version: '0.1.1'  # Fallback to known stable version
+        continue-on-error: true
+
+      - name: Report degraded state
+        if: steps.validate.outcome == 'failure' && steps.retry.outcome == 'success'
+        run: |
+          echo "::warning::Latest LUMOS version failed, using fallback version 0.1.1"
+          echo "Consider updating schemas to be compatible with latest version"
+
+      - name: Final failure check
+        if: steps.validate.outcome == 'failure' && steps.retry.outcome == 'failure'
+        run: |
+          echo "::error::Both latest and pinned versions failed"
+          exit 1
+
+  # Example 5: Output-Based Error Handling
+  output-based-handling:
+    name: Output-Based Error Handling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run LUMOS
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false  # Handle manually
+        continue-on-error: true
+
+      - name: Check outputs and decide
+        run: |
+          VALIDATED="${{ steps.lumos.outputs.schemas-validated }}"
+          GENERATED="${{ steps.lumos.outputs.schemas-generated }}"
+          DRIFT="${{ steps.lumos.outputs.drift-detected }}"
+          OUTCOME="${{ steps.lumos.outcome }}"
+
+          echo "=== LUMOS Outputs ==="
+          echo "Schemas Validated: $VALIDATED"
+          echo "Schemas Generated: $GENERATED"
+          echo "Drift Detected: $DRIFT"
+          echo "Outcome: $OUTCOME"
+          echo "===================="
+
+          # Decision matrix based on outputs
+          if [ "$OUTCOME" = "failure" ] && [ "$VALIDATED" = "0" ]; then
+            echo "::error::VALIDATION_ERROR - Schema syntax errors"
+            exit 1
+          elif [ "$OUTCOME" = "failure" ] && [ "$GENERATED" = "0" ]; then
+            echo "::error::GENERATION_ERROR - Code generation failed"
+            exit 1
+          elif [ "$DRIFT" = "true" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::error::DRIFT_ERROR - Generated code out of sync (PR context)"
+            exit 1
+          elif [ "$DRIFT" = "true" ]; then
+            echo "::warning::DRIFT_WARNING - Generated code out of sync (main branch)"
+          else
+            echo "::notice::SUCCESS - All checks passed"
+          fi
+
+  # Example 6: Custom Error Messages with Context
+  custom-error-messages:
+    name: Custom Error Messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and generate
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'schemas/**/*.lumos'
+          comment-on-pr: false
+        continue-on-error: true
+
+      - name: Post context-aware error message
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drift = '${{ steps.lumos.outputs.drift-detected }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            let message = '## 🚨 LUMOS Check Failed\n\n';
+
+            if (drift === 'true') {
+              message += '**Type:** Schema Drift\n\n';
+              message += '**Description:** Your schemas have changed, but the generated code has not been updated.\n\n';
+              message += '**Resolution:**\n';
+              message += '```bash\n';
+              message += '# 1. Regenerate code\n';
+              message += 'lumos generate schemas/**/*.lumos\n\n';
+              message += '# 2. Review changes\n';
+              message += 'git diff generated.rs generated.ts\n\n';
+              message += '# 3. Commit updates\n';
+              message += 'git add generated.rs generated.ts\n';
+              message += 'git commit -m "chore: Update generated code from schemas"\n';
+              message += '```\n\n';
+              message += '<details>\n<summary>View Diff</summary>\n\n';
+              message += diffSummary;
+              message += '\n</details>';
+            } else {
+              message += '**Type:** Validation or Generation Error\n\n';
+              message += '**Description:** LUMOS CLI encountered an error processing your schemas.\n\n';
+              message += '**Common Causes:**\n';
+              message += '- Syntax errors in `.lumos` files\n';
+              message += '- Undefined type references\n';
+              message += '- Invalid attribute usage\n';
+              message += '- CLI version incompatibility\n\n';
+              message += '**Resolution:**\n';
+              message += '```bash\n';
+              message += '# Validate locally\n';
+              message += 'lumos validate schemas/**/*.lumos\n\n';
+              message += '# Check for syntax errors\n';
+              message += 'lumos check schemas/**/*.lumos\n';
+              message += '```\n\n';
+              message += '**Need Help?** Check the [LUMOS documentation](https://lumos-lang.org) or [open an issue](https://github.com/getlumos/lumos/issues).';
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });

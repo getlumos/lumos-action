@@ -1,0 +1,258 @@
+name: Custom PR Comment Examples
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Example 1: Minimal Custom Comment
+  minimal-custom:
+    name: Minimal Custom Comment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          comment-on-pr: false  # Disable default comment
+
+      - name: Post minimal comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drift = '${{ steps.lumos.outputs.drift-detected }}' === 'true';
+            const icon = drift ? '⚠️' : '✅';
+            const status = drift ? 'Drift detected' : 'All good';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `${icon} **LUMOS:** ${status}`
+            });
+
+  # Example 2: Detailed Comment with Collapsible Sections
+  detailed-collapsible:
+    name: Detailed Collapsible Comment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          comment-on-pr: false
+
+      - name: Post detailed comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drift = '${{ steps.lumos.outputs.drift-detected }}' === 'true';
+            const validated = '${{ steps.lumos.outputs.schemas-validated }}';
+            const generated = '${{ steps.lumos.outputs.schemas-generated || '0' }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            let comment = '## 🔮 LUMOS Schema Check\n\n';
+            comment += `**Status:** ${drift ? '⚠️ Drift Detected' : '✅ No Drift'}\n\n`;
+
+            comment += '<details>\n';
+            comment += '<summary>📊 Statistics</summary>\n\n';
+            comment += `- Schemas validated: ${validated}\n`;
+            comment += `- Schemas generated: ${generated}\n`;
+            comment += '</details>\n\n';
+
+            if (drift) {
+              comment += '<details>\n';
+              comment += '<summary>📝 Changes Required</summary>\n\n';
+              comment += '```bash\n';
+              comment += '# Regenerate code from schemas\n';
+              comment += 'lumos generate schemas/**/*.lumos\n';
+              comment += 'git add .\n';
+              comment += 'git commit -m "chore: Regenerate code from schemas"\n';
+              comment += '```\n';
+              comment += '</details>\n\n';
+
+              comment += '<details>\n';
+              comment += '<summary>🔍 Diff Summary</summary>\n\n';
+              comment += diffSummary + '\n';
+              comment += '</details>\n';
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 3: Team Mention on Drift
+  team-mention:
+    name: Team Mention on Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          comment-on-pr: false
+
+      - name: Notify team on drift
+        if: github.event_name == 'pull_request' && steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            const comment = `## ⚠️ Schema Drift Detected
+
+            @org/schema-maintainers - This PR has schema drift that requires attention.
+
+            **Action Required:**
+            1. Review the schema changes
+            2. Regenerate code: \`lumos generate schemas/**/*.lumos\`
+            3. Commit the generated files
+
+            ${diffSummary}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 4: Parsed Diff with File List
+  parsed-diff:
+    name: Parsed Diff with File List
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          fail-on-drift: false
+
+      - name: Parse and format diff
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drift = '${{ steps.lumos.outputs.drift-detected }}' === 'true';
+
+            if (!drift) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '✅ **LUMOS:** All schemas up to date'
+              });
+              return;
+            }
+
+            // Parse diff-summary to extract file list
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            // Extract file names from markdown (looking for `filename` patterns)
+            const fileMatches = diffSummary.match(/`([^`]+\.(rs|ts))`/g) || [];
+            const files = fileMatches.map(f => f.replace(/`/g, ''));
+
+            let comment = '## 📊 Schema Drift Report\n\n';
+            comment += `**Files affected:** ${files.length}\n\n`;
+
+            if (files.length > 0) {
+              comment += '**Changed files:**\n';
+              files.forEach(file => {
+                const emoji = file.endsWith('.rs') ? '🦀' : '📘';
+                comment += `- ${emoji} \`${file}\`\n`;
+              });
+              comment += '\n';
+            }
+
+            comment += '**Instructions:**\n';
+            comment += '```bash\n';
+            comment += 'lumos generate schemas/**/*.lumos\n';
+            comment += 'git add generated.rs generated.ts\n';
+            comment += 'git commit -m "Update generated code"\n';
+            comment += '```\n';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Example 5: Status Check with Labels
+  status-with-labels:
+    name: Status Check with Auto Labels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        id: lumos
+        with:
+          schema: 'schemas/**/*.lumos'
+          comment-on-pr: false
+
+      - name: Add drift label
+        if: github.event_name == 'pull_request' && steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['schema-drift']
+            });
+
+      - name: Remove drift label if clean
+        if: github.event_name == 'pull_request' && steps.lumos.outputs.drift-detected == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'schema-drift'
+              });
+            } catch (e) {
+              // Label might not exist, ignore
+            }
+
+      - name: Post comment with label
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drift = '${{ steps.lumos.outputs.drift-detected }}' === 'true';
+
+            let comment = '## 🔮 LUMOS Status\n\n';
+
+            if (drift) {
+              comment += '🏷️ **Label:** `schema-drift` has been added\n\n';
+              comment += '⚠️ Please regenerate code from schemas before merging.\n';
+            } else {
+              comment += '✅ All schemas are up to date\n';
+              comment += '🏷️ `schema-drift` label removed (if present)\n';
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
