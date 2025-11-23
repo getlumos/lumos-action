@@ -1,0 +1,368 @@
+name: Monorepo Tiered Validation
+
+# Example showing criticality-based validation tiers
+# Different packages have different failure modes based on importance
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+jobs:
+  # TIER 1: CRITICAL - Must pass, blocks merge
+  critical-packages:
+    name: Critical Packages (Tier 1)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true  # Stop all critical packages if one fails
+      matrix:
+        package:
+          - auth          # Authentication & authorization
+          - payments      # Payment processing
+          - security      # Security schemas
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ${{ matrix.package }} (CRITICAL)
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+          working-directory: 'packages/${{ matrix.package }}'
+          fail-on-drift: true  # STRICT - any drift blocks merge
+          comment-on-pr: false
+
+      - name: Report critical drift
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚨 CRITICAL: \`${pkg}\` Schema Drift
+
+**⚠️ This is a CRITICAL package. Merge is BLOCKED.**
+
+**Tier:** 1 (Critical)
+**Policy:** Must be in sync before merge
+**Requires:** Schema regeneration + review
+
+**Diff Summary:**
+\`\`\`
+${diffSummary}
+\`\`\`
+
+**To fix:**
+\`\`\`bash
+cd packages/${pkg}
+lumos generate schemas/*.lumos
+git add generated/
+git commit -m "fix(${pkg}): Update generated schemas"
+\`\`\`
+
+**Why this blocks merge:**
+- \`${pkg}\` is a critical package affecting security/payments/auth
+- Schema changes require careful review
+- Generated code must be verified before merge
+              `
+            });
+
+  # TIER 2: STANDARD - Should pass, warns but doesn't block
+  standard-packages:
+    name: Standard Packages (Tier 2)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Don't block CI if these fail
+    strategy:
+      fail-fast: false  # Check all packages even if one fails
+      matrix:
+        package:
+          - users         # User profiles
+          - profiles      # User settings
+          - notifications # Notification schemas
+          - messaging     # Messaging system
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ${{ matrix.package }} (STANDARD)
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+          working-directory: 'packages/${{ matrix.package }}'
+          fail-on-drift: true  # Check for drift, but continue-on-error allows merge
+          comment-on-pr: false
+
+      - name: Report standard drift
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ⚠️ STANDARD: \`${pkg}\` Schema Drift
+
+**This package has drift but won't block merge.**
+
+**Tier:** 2 (Standard)
+**Policy:** Warning only, merge allowed
+**Recommended:** Fix before merge, but not required
+
+**Diff Summary:**
+\`\`\`
+${diffSummary}
+\`\`\`
+
+**To fix (recommended):**
+\`\`\`bash
+cd packages/${pkg}
+lumos generate schemas/*.lumos
+git add generated/
+\`\`\`
+
+**Or fix after merge:**
+This can be addressed in a follow-up PR.
+              `
+            });
+
+      - name: Report standard success
+        if: steps.lumos.outputs.drift-detected != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            console.log(`✅ ${pkg} (Tier 2): No drift detected`);
+
+  # TIER 3: EXPERIMENTAL - Informational only, never blocks
+  experimental-packages:
+    name: Experimental Packages (Tier 3)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Never block CI
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - analytics           # Analytics tracking
+          - internal-tools      # Internal tooling
+          - experimental-features  # Experimental features
+          - playground          # Testing/sandbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ${{ matrix.package }} (EXPERIMENTAL)
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+          working-directory: 'packages/${{ matrix.package }}'
+          fail-on-drift: false  # Never fail, purely informational
+          comment-on-pr: false
+
+      - name: Report experimental status
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ℹ️ EXPERIMENTAL: \`${pkg}\` Schema Drift
+
+**FYI: Experimental package has drift (informational only)**
+
+**Tier:** 3 (Experimental)
+**Policy:** No action required
+**Impact:** None - experimental packages don't block merge
+
+**Diff Summary:**
+\`\`\`
+${diffSummary}
+\`\`\`
+
+**Optional fix:**
+\`\`\`bash
+cd packages/${pkg}
+lumos generate schemas/*.lumos
+\`\`\`
+
+This is informational only. Feel free to address later or ignore.
+              `
+            });
+
+  # Summary report showing results by tier
+  validation-summary:
+    name: Tiered Validation Summary
+    needs: [critical-packages, standard-packages, experimental-packages]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create tier summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const criticalResult = '${{ needs.critical-packages.result }}';
+            const standardResult = '${{ needs.standard-packages.result }}';
+            const experimentalResult = '${{ needs.experimental-packages.result }}';
+
+            let summary = `## 📊 Tiered Validation Summary\n\n`;
+
+            summary += `| Tier | Status | Blocks Merge? | Policy |\n`;
+            summary += `|------|--------|---------------|--------|\n`;
+            summary += `| 🚨 Critical | ${criticalResult === 'success' ? '✅ Passed' : '❌ Failed'} | `;
+            summary += `${criticalResult === 'success' ? 'No' : '**YES**'} | Must pass |\n`;
+            summary += `| ⚠️ Standard | ${standardResult === 'success' ? '✅ Passed' : '⚠️ Warning'} | No | Should pass |\n`;
+            summary += `| ℹ️ Experimental | ${experimentalResult === 'success' ? '✅ Passed' : 'ℹ️ Info'} | No | Informational |\n`;
+
+            summary += `\n**Overall Status:** `;
+
+            if (criticalResult === 'success') {
+              summary += `✅ **Ready to merge** (critical packages passed)\n\n`;
+              if (standardResult !== 'success') {
+                summary += `⚠️ Standard packages have issues, but merge is allowed.\n`;
+              }
+              if (experimentalResult !== 'success') {
+                summary += `ℹ️ Experimental packages have drift (informational only).\n`;
+              }
+            } else {
+              summary += `❌ **BLOCKED** (critical packages failed)\n\n`;
+              summary += `🚨 Critical packages must pass before merge is allowed.\n`;
+            }
+
+            summary += `\n---\n\n`;
+            summary += `**Tier Definitions:**\n\n`;
+            summary += `- **Tier 1 (Critical):** auth, payments, security - Must pass, blocks merge\n`;
+            summary += `- **Tier 2 (Standard):** users, profiles, notifications, messaging - Should pass, warns only\n`;
+            summary += `- **Tier 3 (Experimental):** analytics, tools, experimental - Informational, no action needed\n`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+# Tier Configuration Reference
+#
+# TIER 1: CRITICAL
+# ├─ Packages: auth, payments, security
+# ├─ fail-on-drift: true
+# ├─ continue-on-error: false
+# ├─ Blocks merge: YES
+# └─ Use case: Security-sensitive, financial, authentication
+#
+# TIER 2: STANDARD
+# ├─ Packages: users, profiles, notifications, messaging
+# ├─ fail-on-drift: true
+# ├─ continue-on-error: true
+# ├─ Blocks merge: NO (warns)
+# └─ Use case: Important but not critical, can fix after merge
+#
+# TIER 3: EXPERIMENTAL
+# ├─ Packages: analytics, internal-tools, experimental, playground
+# ├─ fail-on-drift: false
+# ├─ continue-on-error: true
+# ├─ Blocks merge: NO (informational)
+# └─ Use case: Experimental features, internal tools, rapid iteration
+
+# How to Determine Package Tier:
+#
+# ASK THESE QUESTIONS:
+#
+# 1. Does this package handle money/payments?
+#    YES → Tier 1 (Critical)
+#
+# 2. Does this package handle authentication/authorization?
+#    YES → Tier 1 (Critical)
+#
+# 3. Does this package handle security or encryption?
+#    YES → Tier 1 (Critical)
+#
+# 4. Is this package used in production by external users?
+#    YES → Tier 2 (Standard)
+#    NO  → Tier 3 (Experimental)
+#
+# 5. Would schema drift cause user-facing bugs?
+#    YES → Tier 2 (Standard)
+#    NO  → Tier 3 (Experimental)
+#
+# 6. Is this package experimental or internal-only?
+#    YES → Tier 3 (Experimental)
+
+# Example Tier Assignments by Domain:
+#
+# E-Commerce:
+# - Tier 1: auth, payments, checkout, orders
+# - Tier 2: products, users, reviews, cart
+# - Tier 3: analytics, recommendations, internal-tools
+#
+# SaaS Platform:
+# - Tier 1: auth, billing, security, permissions
+# - Tier 2: workspaces, projects, notifications, settings
+# - Tier 3: analytics, experiments, dev-tools
+#
+# Gaming:
+# - Tier 1: auth, in-game-purchases, player-accounts
+# - Tier 2: inventory, leaderboards, matchmaking
+# - Tier 3: analytics, telemetry, dev-console
+
+# Advanced: Environment-Specific Tiers
+#
+# You can combine tiers with branch-based rules:
+#
+# jobs:
+#   critical-packages-production:
+#     if: github.base_ref == 'main'
+#     strategy:
+#       matrix:
+#         package: [auth, payments, security]
+#     steps:
+#       - uses: getlumos/lumos-action@v1
+#         with:
+#           fail-on-drift: true  # Strict for production
+#
+#   critical-packages-staging:
+#     if: github.base_ref == 'staging'
+#     strategy:
+#       matrix:
+#         package: [auth, payments, security]
+#     steps:
+#       - uses: getlumos/lumos-action@v1
+#         with:
+#           fail-on-drift: false  # Lenient for staging
+
+# Benefits of Tiered Validation:
+#
+# - ✅ Flexible failure modes per package importance
+# - ✅ Critical packages strictly enforced
+# - ✅ Standard packages provide warnings without blocking
+# - ✅ Experimental packages tracked without noise
+# - ✅ Clear communication of package criticality to team
+# - ✅ Prevents over-engineering (not everything is critical)
+
+# When to Use This Pattern:
+#
+# - ✅ Monorepos with packages of varying importance
+# - ✅ Teams with different risk tolerance per feature
+# - ✅ Fast-moving experimental features alongside stable core
+# - ✅ Clear separation between production and internal packages
+# - ✅ Need to balance strictness with developer velocity
+
+# When NOT to Use:
+#
+# - ❌ All packages are equally critical (use simple matrix instead)
+# - ❌ Team is small and can review all drift manually
+# - ❌ Monorepo is simple (< 5 packages)

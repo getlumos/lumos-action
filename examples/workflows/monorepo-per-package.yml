@@ -1,0 +1,303 @@
+name: Monorepo Per-Package Validation
+
+# Complete example showing per-package drift detection in monorepos
+# Uses matrix strategy to validate each package independently
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+jobs:
+  # Step 1: Detect which packages have changed
+  detect-changed-packages:
+    name: Detect Changed Packages
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.filter.outputs.changes }}
+      has-changes: ${{ steps.filter.outputs.changes != '[]' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for changed packages
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            auth:
+              - 'packages/auth/schemas/**'
+              - 'packages/auth/generated/**'
+            payments:
+              - 'packages/payments/schemas/**'
+              - 'packages/payments/generated/**'
+            users:
+              - 'packages/users/schemas/**'
+              - 'packages/users/generated/**'
+            analytics:
+              - 'packages/analytics/schemas/**'
+              - 'packages/analytics/generated/**'
+            notifications:
+              - 'packages/notifications/schemas/**'
+              - 'packages/notifications/generated/**'
+
+      - name: Report changed packages
+        run: |
+          echo "Changed packages: ${{ steps.filter.outputs.changes }}"
+
+  # Step 2: Validate only changed packages
+  validate-changed-packages:
+    name: Validate ${{ matrix.package }}
+    needs: detect-changed-packages
+    if: needs.detect-changed-packages.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # Continue validating other packages even if one fails
+      max-parallel: 4   # Run up to 4 packages in parallel
+      matrix:
+        package: ${{ fromJSON(needs.detect-changed-packages.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ${{ matrix.package }} schemas
+        id: lumos
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+          working-directory: 'packages/${{ matrix.package }}'
+          fail-on-drift: true
+          comment-on-pr: false  # We'll create custom comments below
+
+      - name: Store validation results
+        id: results
+        run: |
+          echo "validated=${{ steps.lumos.outputs.schemas-validated }}" >> $GITHUB_OUTPUT
+          echo "generated=${{ steps.lumos.outputs.schemas-generated }}" >> $GITHUB_OUTPUT
+          echo "drift=${{ steps.lumos.outputs.drift-detected }}" >> $GITHUB_OUTPUT
+
+      - name: Create success comment
+        if: success() && steps.lumos.outputs.drift-detected != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            const validated = '${{ steps.lumos.outputs.schemas-validated }}';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ Package \`${pkg}\` Validated
+
+**Schemas validated:** ${validated}
+**Status:** No drift detected
+
+All schemas are up-to-date!
+              `
+            });
+
+      - name: Create drift warning comment
+        if: steps.lumos.outputs.drift-detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+            const diffSummary = `${{ steps.lumos.outputs.diff-summary }}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ⚠️ Package \`${pkg}\` Schema Drift
+
+Generated code is out of sync with schemas.
+
+**Diff Summary:**
+\`\`\`
+${diffSummary}
+\`\`\`
+
+**To fix:**
+\`\`\`bash
+cd packages/${pkg}
+lumos generate schemas/*.lumos
+git add generated/
+git commit -m "chore(${pkg}): Update generated code"
+\`\`\`
+
+**Or regenerate all packages:**
+\`\`\`bash
+for pkg in packages/*/; do
+  cd "$pkg"
+  lumos generate schemas/*.lumos
+  cd ../..
+done
+\`\`\`
+              `
+            });
+
+      - name: Report package failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkg = '${{ matrix.package }}';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ Package \`${pkg}\` Validation Failed
+
+Schema validation failed for the \`${pkg}\` package.
+
+**Check the workflow logs for details:**
+[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+**Common issues:**
+- Invalid schema syntax
+- Missing required fields
+- Type definition errors
+- File permission issues
+
+**To debug locally:**
+\`\`\`bash
+cd packages/${pkg}
+lumos validate schemas/*.lumos
+lumos generate schemas/*.lumos
+\`\`\`
+              `
+            });
+
+  # Step 3: Summary report across all packages
+  validation-summary:
+    name: Validation Summary
+    needs: [detect-changed-packages, validate-changed-packages]
+    if: always() && needs.detect-changed-packages.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create summary comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const packages = JSON.parse('${{ needs.detect-changed-packages.outputs.packages }}');
+            const jobResults = '${{ toJSON(needs.validate-changed-packages.result) }}';
+
+            let summary = `## 📦 Monorepo Validation Summary\n\n`;
+            summary += `**Packages validated:** ${packages.length}\n\n`;
+            summary += `| Package | Status |\n`;
+            summary += `|---------|--------|\n`;
+
+            for (const pkg of packages) {
+              const status = jobResults === 'success' ? '✅ Passed' :
+                           jobResults === 'failure' ? '❌ Failed' : '⚠️ Warning';
+              summary += `| \`${pkg}\` | ${status} |\n`;
+            }
+
+            summary += `\n**Overall Status:** ${jobResults}\n`;
+
+            if (jobResults === 'failure') {
+              summary += `\n⚠️ One or more packages failed validation. Review the logs above for details.\n`;
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+  # Optional: Validate all packages (not just changed ones)
+  # Useful for scheduled runs to catch drift
+  validate-all-packages:
+    name: Validate All Packages (Scheduled)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - auth
+          - payments
+          - users
+          - analytics
+          - notifications
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+          working-directory: 'packages/${{ matrix.package }}'
+          fail-on-drift: true
+          comment-on-pr: false
+
+# Example monorepo structure this workflow expects:
+#
+# monorepo/
+# ├── packages/
+# │   ├── auth/
+# │   │   ├── schemas/
+# │   │   │   ├── user.lumos
+# │   │   │   └── session.lumos
+# │   │   └── generated/
+# │   │       ├── generated.rs
+# │   │       └── generated.ts
+# │   ├── payments/
+# │   │   ├── schemas/
+# │   │   │   └── transaction.lumos
+# │   │   └── generated/
+# │   ├── users/
+# │   │   ├── schemas/
+# │   │   └── generated/
+# │   ├── analytics/
+# │   │   ├── schemas/
+# │   │   └── generated/
+# │   └── notifications/
+# │       ├── schemas/
+# │       └── generated/
+# └── .github/
+#     └── workflows/
+#         └── monorepo-per-package.yml  # This file
+
+# Key Features:
+#
+# 1. **Change Detection:**
+#    - Uses paths-filter to detect which packages changed
+#    - Only validates packages with schema/generated changes
+#    - Efficient for large monorepos (doesn't validate everything)
+#
+# 2. **Isolated Validation:**
+#    - Each package validated independently in matrix job
+#    - Failures in one package don't block others (fail-fast: false)
+#    - Parallel execution (max-parallel: 4) for speed
+#
+# 3. **Package-Specific Comments:**
+#    - Success: "✅ Package validated"
+#    - Drift: "⚠️ Schema drift" with fix instructions
+#    - Failure: "❌ Validation failed" with debug steps
+#
+# 4. **Summary Report:**
+#    - Table showing status of all validated packages
+#    - Overall success/failure status
+#    - Posted after all packages complete
+#
+# 5. **Optional: Scheduled Validation:**
+#    - Validates all packages on schedule (e.g., daily)
+#    - Catches drift that crept in over time
+#    - Add to workflow triggers: schedule: cron: '0 0 * * *'
+
+# Benefits:
+#
+# - ✅ Per-package drift detection
+# - ✅ Isolated failures (one package doesn't break others)
+# - ✅ Efficient (only validates changed packages)
+# - ✅ Clear feedback per package
+# - ✅ Parallel execution for speed
+# - ✅ Works with any number of packages
+
+# Limitations:
+#
+# - Requires manual package list in paths-filter
+# - Cannot output per-package drift status (workaround: separate jobs)
+# - No built-in breaking change detection (see breaking-change-detection.yml)

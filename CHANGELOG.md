@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documentation:** `docs/monorepo-advanced.md` - Advanced monorepo strategies guide
+  - Per-package drift detection with matrix strategy + path filtering
+  - Selective failure strategies (criticality tiers)
+  - Breaking change detection via git diff analysis
+  - Feature requests for native support
+  - Best practices and troubleshooting
+- **Examples:** `examples/workflows/monorepo-per-package.yml` - Complete per-package validation
+  - Path-based change detection with dorny/paths-filter@v3
+  - Matrix strategy with package-specific comments
+  - Validation summary across all packages
+  - Optional scheduled validation for all packages
+- **Examples:** `examples/workflows/monorepo-tiered-validation.yml` - Criticality-based enforcement
+  - Tier 1 (Critical): auth, payments, security - Must pass, blocks merge
+  - Tier 2 (Standard): users, profiles - Warn only, allows merge
+  - Tier 3 (Experimental): analytics, tools - Informational only
+  - Environment-based rules (production vs staging)
+  - Manual approval workflow for critical packages
+- **Examples:** `examples/workflows/breaking-change-detection.yml` - Git diff schema analysis
+  - Detects field removals (breaking)
+  - Detects type changes (breaking)
+  - Detects enum variant removals (breaking)
+  - Detects new required fields (potentially breaking)
+  - Requires breaking-change label on PRs
+  - Advanced Borsh compatibility validation
+- **Examples:** `examples/monorepo-setup-guide.md` - Step-by-step monorepo setup
+  - Directory structure recommendations
+  - 3 validation strategies (simple matrix, path-filtered, tiered)
+  - Complete workflow setup guide
+  - Path filter configuration
+  - Local testing instructions
+  - Deployment checklist
+  - Troubleshooting guide
+- **Documentation:** Expanded "Monorepo Support" section in README
+  - Per-package drift detection examples
+  - Selective failure strategies examples
+  - Breaking change detection overview
+  - Links to comprehensive guides and examples
+
+### Added (from previous work)
+
 - **Documentation:** `docs/multi-language.md` - Comprehensive guide to dual-language generation
   - Why both Rust and TypeScript are generated
   - 3 language separation strategies (move, copy, symlinks)
@@ -75,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Q5 (PR Comment Customization): 72 → 85 (+13 points)
 - Q7 (Custom Output Paths): 65 → 80 (+15 points)
 - Q8 (Error Type Documentation): 72 → 85 (+13 points)
-- Overall Score: 68.6 → 75.3 (+6.7 points)
+- Q10 (Monorepo Per-Package Drift Detection): 28 → 80 (+52 points)
+- Overall Score: 68.6 → 80.5 (+11.9 points)
 
 ## [1.0.0] - 2025-11-22
 

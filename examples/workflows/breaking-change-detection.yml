@@ -1,0 +1,378 @@
+name: Breaking Change Detection
+
+# Detects potential breaking changes in .lumos schema files
+# LUMOS CLI doesn't have built-in breaking change detection,
+# so this workflow uses git diff analysis as a workaround
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # Job 1: Detect which schema files changed
+  detect-schema-changes:
+    name: Detect Schema Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has-changes: ${{ steps.changes.outputs.count > 0 }}
+      changed-files: ${{ steps.changes.outputs.files }}
+      change-count: ${{ steps.changes.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for git diff
+
+      - name: Get changed schema files
+        id: changes
+        run: |
+          # Find all modified .lumos files
+          git diff origin/${{ github.base_ref }}...HEAD \
+            --name-only \
+            --diff-filter=M \
+            '**/*.lumos' > changed_schemas.txt
+
+          count=$(wc -l < changed_schemas.txt | tr -d ' ')
+          echo "count=$count" >> $GITHUB_OUTPUT
+
+          if [ "$count" -gt 0 ]; then
+            echo "files<<EOF" >> $GITHUB_OUTPUT
+            cat changed_schemas.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+
+            echo "📝 Found $count changed schema file(s)"
+            cat changed_schemas.txt
+          else
+            echo "No schema changes detected"
+            echo "files=" >> $GITHUB_OUTPUT
+          fi
+
+  # Job 2: Analyze each changed schema for breaking changes
+  analyze-breaking-changes:
+    name: Analyze Breaking Changes
+    needs: detect-schema-changes
+    if: needs.detect-schema-changes.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze schemas for breaking changes
+        id: analyze
+        run: |
+          breaking=false
+          breaking_details=""
+
+          # Read changed files
+          changed_files="${{ needs.detect-schema-changes.outputs.changed-files }}"
+
+          echo "$changed_files" | while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            echo "::group::Analyzing $file"
+
+            # Get old version from base branch
+            git show origin/${{ github.base_ref }}:"$file" > old_schema.lumos 2>/dev/null || {
+              echo "⚠️ File didn't exist in base branch (new file)"
+              echo "::endgroup::"
+              continue
+            }
+
+            # Check for field removals (BREAKING)
+            echo "Checking for removed fields..."
+            removed_fields=$(diff old_schema.lumos "$file" | grep '^-.*:' | grep -v '^---' || true)
+
+            if [ -n "$removed_fields" ]; then
+              echo "::warning file=$file::Potential breaking change: field(s) removed"
+              echo "Removed fields:"
+              echo "$removed_fields"
+              breaking=true
+            fi
+
+            # Check for type changes (BREAKING)
+            echo "Checking for type changes..."
+
+            # Extract field definitions (name: type)
+            grep -E '^\s+\w+:\s*\w+' old_schema.lumos | sort > old_types.txt 2>/dev/null || true
+            grep -E '^\s+\w+:\s*\w+' "$file" | sort > new_types.txt 2>/dev/null || true
+
+            changed_types=$(comm -3 old_types.txt new_types.txt || true)
+
+            if [ -n "$changed_types" ]; then
+              echo "::warning file=$file::Type definitions changed (review for breaking changes)"
+              echo "Changed type definitions:"
+              echo "$changed_types"
+              breaking=true
+            fi
+
+            # Check for enum variant removals (BREAKING)
+            echo "Checking for enum variant changes..."
+
+            enum_changes=$(diff old_schema.lumos "$file" | grep -E '^-\s+\w+(\(|,|$)' | grep -v '^---' || true)
+
+            if [ -n "$enum_changes" ]; then
+              echo "::warning file=$file::Enum variant(s) may have been removed"
+              echo "Removed variants:"
+              echo "$enum_changes"
+              breaking=true
+            fi
+
+            # Check for required field additions (BREAKING if not Option<T>)
+            echo "Checking for new required fields..."
+
+            new_fields=$(diff old_schema.lumos "$file" | grep '^+.*:' | grep -v '^+++' | grep -v 'Option<' || true)
+
+            if [ -n "$new_fields" ]; then
+              echo "::warning file=$file::New required field(s) added (potentially breaking)"
+              echo "New required fields:"
+              echo "$new_fields"
+              echo "ℹ️ If these are Option<T>, they're non-breaking"
+              breaking=true
+            fi
+
+            echo "::endgroup::"
+
+          done
+
+          if [ "$breaking" = true ]; then
+            echo "BREAKING_DETECTED=true" >> $GITHUB_ENV
+            echo "breaking=true" >> $GITHUB_OUTPUT
+          else
+            echo "BREAKING_DETECTED=false" >> $GITHUB_ENV
+            echo "breaking=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create breaking change summary
+        if: env.BREAKING_DETECTED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚨 Potential Breaking Changes Detected
+
+Schema changes include modifications that may break existing code.
+
+**⚠️ Breaking changes detected in .lumos schemas**
+
+### Analysis Results
+
+The following potential breaking changes were found:
+- Field removals
+- Type changes
+- Enum variant removals
+- New required fields
+
+**See workflow logs for detailed analysis of each file.**
+
+---
+
+### Breaking Change Checklist
+
+Before merging, ensure:
+
+- [ ] **Migration guide** added to PR description
+- [ ] **CHANGELOG.md** updated with breaking changes section
+- [ ] **Version bump** planned (major version if using semver)
+- [ ] **Team notified** of breaking changes
+- [ ] **Deprecation period** considered (if applicable)
+- [ ] **Backward compatibility** assessed
+
+---
+
+### Breaking vs Non-Breaking Changes
+
+**❌ Breaking Changes:**
+- Removing a field from a struct
+- Changing a field's type (e.g., \`u32\` → \`u64\`)
+- Renaming a field
+- Removing an enum variant
+- Adding a required (non-\`Option<T>\`) field
+- Changing field order (may affect Borsh serialization)
+
+**✅ Non-Breaking Changes:**
+- Adding an optional field (\`Option<T>\`)
+- Adding a new enum variant (at the end)
+- Updating comments/documentation
+- Adding new structs/enums
+
+---
+
+### Next Steps
+
+1. **Review the changes** in the workflow logs above
+2. **Add \`breaking-change\` label** to this PR
+3. **Document migration path** in PR description
+4. **Update CHANGELOG.md** with breaking changes section
+5. **Consider version bump** (if applicable)
+
+If these changes are intentional, proceed with merge after completing the checklist.
+If not, consider making changes backward-compatible.
+            `
+            });
+
+      - name: Require breaking-change label
+        if: env.BREAKING_DETECTED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            const labels = pr.labels.map(l => l.name);
+
+            if (!labels.includes('breaking-change')) {
+              core.setFailed('⚠️ Breaking changes detected. Please add "breaking-change" label to proceed.');
+
+              // Optionally add the label automatically
+              // await github.rest.issues.addLabels({
+              //   owner: context.repo.owner,
+              //   repo: context.repo.repo,
+              //   issue_number: context.issue.number,
+              //   labels: ['breaking-change']
+              // });
+            } else {
+              console.log('✅ breaking-change label present');
+            }
+
+      - name: Success message
+        if: env.BREAKING_DETECTED != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ No Breaking Changes Detected
+
+Schema changes appear to be backward-compatible.
+
+**Analysis completed:**
+- No field removals
+- No type changes
+- No enum variant removals
+- No new required fields
+
+These changes should be safe to merge.
+
+**Note:** This is an automated analysis. Always review schema changes manually for correctness.
+              `
+            });
+
+  # Optional: Advanced analysis using LUMOS CLI
+  # (Requires LUMOS to be installed)
+  advanced-analysis:
+    name: Advanced Analysis (Optional)
+    needs: detect-schema-changes
+    if: needs.detect-schema-changes.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Don't block if this fails
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install LUMOS CLI
+        uses: getlumos/lumos-action@v1
+        with:
+          schema: 'dummy.lumos'  # Just to install CLI
+          check-only: true
+
+      - name: Generate from old schemas
+        run: |
+          changed_files="${{ needs.detect-schema-changes.outputs.changed-files }}"
+
+          echo "$changed_files" | while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            echo "Processing $file..."
+
+            # Generate from old version
+            git show origin/${{ github.base_ref }}:"$file" > old_schema.lumos
+            lumos generate old_schema.lumos --output old_generated 2>/dev/null || {
+              echo "⚠️ Failed to generate from old schema"
+              continue
+            }
+
+            # Generate from new version
+            lumos generate "$file" --output new_generated 2>/dev/null || {
+              echo "⚠️ Failed to generate from new schema"
+              continue
+            }
+
+            # Compare generated TypeScript files
+            if [ -f old_generated/generated.ts ] && [ -f new_generated/generated.ts ]; then
+              echo "Comparing TypeScript generated code..."
+              diff old_generated/generated.ts new_generated/generated.ts || {
+                echo "::warning file=$file::Generated TypeScript changed"
+              }
+            fi
+
+            # Compare generated Rust files
+            if [ -f old_generated/generated.rs ] && [ -f new_generated/generated.rs ]; then
+              echo "Comparing Rust generated code..."
+              diff old_generated/generated.rs new_generated/generated.rs || {
+                echo "::warning file=$file::Generated Rust changed"
+              }
+            fi
+
+          done
+
+# What This Workflow Detects:
+#
+# 1. **Field Removals** (BREAKING)
+#    - Detects lines removed with pattern: "fieldname: Type"
+#    - Example: Removing "email: String" from a struct
+#
+# 2. **Type Changes** (BREAKING)
+#    - Compares field type definitions between versions
+#    - Example: "balance: u32" → "balance: u64"
+#
+# 3. **Enum Variant Removals** (BREAKING)
+#    - Detects removed enum variants
+#    - Example: Removing "Cancelled" from OrderStatus enum
+#
+# 4. **New Required Fields** (POTENTIALLY BREAKING)
+#    - Detects new non-optional fields
+#    - Example: Adding "phone: String" (breaking) vs "phone: Option<String>" (safe)
+
+# Limitations:
+#
+# - ⚠️ This is regex-based heuristic analysis, not semantic analysis
+# - ⚠️ May produce false positives (e.g., field reordering)
+# - ⚠️ Cannot detect all breaking changes (e.g., semantic changes)
+# - ⚠️ Requires manual review for accuracy
+# - ✅ Best used as a warning system, not enforcement
+
+# Best Practices:
+#
+# 1. **Always review manually** - Don't rely solely on automated detection
+# 2. **Use semantic versioning** - Major version bump for breaking changes
+# 3. **Document migrations** - Provide clear upgrade path in PR description
+# 4. **Deprecation period** - Mark fields as deprecated before removal
+# 5. **Notify stakeholders** - Alert teams that depend on these schemas
+
+# Integration with Branch Protection:
+#
+# To require breaking-change label on PRs with breaking changes:
+#
+# 1. Add this workflow
+# 2. Create "breaking-change" label in GitHub
+# 3. Configure branch protection to require this workflow to pass
+# 4. Workflow will fail if breaking changes detected without label
+
+# Future Enhancement Requests:
+#
+# Track these as feature requests for native LUMOS CLI support:
+#
+# - [ ] lumos diff old.lumos new.lumos --check-breaking
+# - [ ] lumos validate --breaking-changes old.lumos new.lumos
+# - [ ] Semantic schema comparison (not just text diff)
+# - [ ] Borsh schema compatibility validation
+# - [ ] Auto-generate migration code

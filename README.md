@@ -241,7 +241,9 @@ See [docs/custom-output-paths.md](docs/custom-output-paths.md) for:
 
 ### Monorepo Support
 
-For projects with multiple packages, use matrix strategy:
+For projects with multiple packages, use matrix strategy to validate each package independently.
+
+**Basic Per-Package Validation:**
 
 ```yaml
 jobs:
@@ -260,15 +262,80 @@ jobs:
 ```
 
 **Benefits:**
-- Each package validated independently
-- Parallel execution (faster)
-- Failures isolated per package
+- ✅ Each package validated independently
+- ✅ Parallel execution (faster for large monorepos)
+- ✅ Failures isolated per package
+- ✅ Package-specific drift detection
 
-See [examples/workflows/monorepo-multi-package.yml](examples/workflows/monorepo-multi-package.yml) for:
-- ✅ 7 complete monorepo strategies
-- ✅ Matrix vs sequential generation
-- ✅ Centralized vs distributed outputs
-- ✅ Smart generation (changed packages only)
+**Advanced Features:**
+
+**Per-Package Drift Detection** - Matrix strategy with path filtering:
+
+```yaml
+jobs:
+  detect-changes:
+    outputs:
+      packages: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            auth: 'packages/auth/**'
+            payments: 'packages/payments/**'
+
+  validate:
+    needs: detect-changes
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
+    steps:
+      - uses: getlumos/lumos-action@v1
+        with:
+          schema: 'packages/${{ matrix.package }}/schemas/*.lumos'
+```
+
+**Selective Failure Strategies** - Criticality-based validation tiers:
+
+```yaml
+jobs:
+  # Critical packages - must pass (blocks merge)
+  critical:
+    strategy:
+      matrix:
+        package: [auth, payments]
+    steps:
+      - uses: getlumos/lumos-action@v1
+        with:
+          fail-on-drift: true
+
+  # Standard packages - warn only (allows merge)
+  standard:
+    continue-on-error: true
+    strategy:
+      matrix:
+        package: [users, analytics]
+    steps:
+      - uses: getlumos/lumos-action@v1
+        with:
+          fail-on-drift: true
+```
+
+**Breaking Change Detection** - Git diff analysis for schema changes:
+
+See [docs/monorepo-advanced.md](docs/monorepo-advanced.md) for:
+- ✅ Per-package drift detection with matrix + path filters
+- ✅ Selective failure strategies (criticality tiers)
+- ✅ Breaking change detection (field removals, type changes)
+- ✅ Package-specific build failure control
+- ✅ Feature requests for native support
+
+**Complete Examples:**
+- [Monorepo Multi-Package](examples/workflows/monorepo-multi-package.yml) - 7 monorepo strategies
+- [Per-Package Validation](examples/workflows/monorepo-per-package.yml) - Matrix with path filtering
+- [Tiered Validation](examples/workflows/monorepo-tiered-validation.yml) - Criticality-based enforcement
+- [Breaking Change Detection](examples/workflows/breaking-change-detection.yml) - Git diff analysis
+- [Setup Guide](examples/monorepo-setup-guide.md) - Step-by-step monorepo setup
 
 ### Example Workflows
 
