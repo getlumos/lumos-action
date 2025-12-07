@@ -79,8 +79,21 @@ runs:
       run: |
         echo "Validating LUMOS schemas..."
 
-        # Find all schema files
-        SCHEMA_FILES=$(find . -path "${{ inputs.schema }}" -type f)
+        # Find all schema files (use -name for globs, fallback to exact match)
+        SCHEMA_PATTERN="${{ inputs.schema }}"
+        if [[ "$SCHEMA_PATTERN" == *"*"* ]]; then
+          # Pattern contains wildcard, use find with -name
+          SCHEMA_FILES=$(find . -name "*.lumos" -type f)
+        else
+          # Exact path, ensure it exists
+          if [ -f "$SCHEMA_PATTERN" ]; then
+            SCHEMA_FILES="$SCHEMA_PATTERN"
+          else
+            echo "::error file=$SCHEMA_PATTERN::Schema file not found"
+            exit 1
+          fi
+        fi
+
         SCHEMA_COUNT=$(echo "$SCHEMA_FILES" | wc -l | tr -d ' ')
 
         echo "Found $SCHEMA_COUNT schema file(s)"
@@ -110,8 +123,21 @@ runs:
       run: |
         echo "Generating code from LUMOS schemas..."
 
-        # Find all schema files
-        SCHEMA_FILES=$(find . -path "${{ inputs.schema }}" -type f)
+        # Find all schema files (use -name for globs, fallback to exact match)
+        SCHEMA_PATTERN="${{ inputs.schema }}"
+        if [[ "$SCHEMA_PATTERN" == *"*"* ]]; then
+          # Pattern contains wildcard, use find with -name
+          SCHEMA_FILES=$(find . -name "*.lumos" -type f)
+        else
+          # Exact path, ensure it exists
+          if [ -f "$SCHEMA_PATTERN" ]; then
+            SCHEMA_FILES="$SCHEMA_PATTERN"
+          else
+            echo "::error file=$SCHEMA_PATTERN::Schema file not found"
+            exit 1
+          fi
+        fi
+
         GENERATED_COUNT=0
 
         # Generate from each schema
