@@ -117,7 +117,9 @@ runs:
         # Generate from each schema
         for schema in $SCHEMA_FILES; do
           echo "Generating from $schema..."
-          if lumos generate "$schema"; then
+          # Get directory of schema file to output generated files in same location
+          schema_dir=$(dirname "$schema")
+          if lumos generate "$schema" --output "$schema_dir"; then
             GENERATED_COUNT=$((GENERATED_COUNT + 1))
           else
             echo "::error file=$schema::Code generation failed"
